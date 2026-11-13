@@ -1,0 +1,6 @@
+node_modules/
+data/
+test-results/
+*.log
+# Recherche-Material (fremde Inhalte/Screenshots) bleibt privat
+evidence/

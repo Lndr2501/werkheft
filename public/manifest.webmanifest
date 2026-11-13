@@ -1,0 +1,19 @@
+{
+  "id": "/",
+  "name": "Werkheft – Deine Garage",
+  "short_name": "Werkheft",
+  "lang": "de",
+  "start_url": "/#garage",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#171719",
+  "theme_color": "#171719",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

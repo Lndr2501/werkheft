@@ -1,0 +1,33 @@
+services:
+  werkheft:
+    build:
+      context: ./app
+    image: werkheft:local
+    container_name: werkheft
+    restart: unless-stopped
+    user: "1000:1000"
+    environment:
+      PORT: "3000"
+      WERKHEFT_BIND: "0.0.0.0"
+      WERKHEFT_PRIVATE_LAN: "1"
+      WERKHEFT_ALLOWED_HOSTS: "192.168.178.230,docker01,werkheft.drydev.eu"
+      WERKHEFT_DB: /data/werkheft.sqlite
+    ports:
+      - "192.168.178.230:4177:3000"
+    volumes:
+      - /srv/werkheft/data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 100
+    mem_limit: 512m
+    cpus: 1.0
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

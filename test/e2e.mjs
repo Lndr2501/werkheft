@@ -1,0 +1,80 @@
+import {chromium} from 'playwright';
+import assert from 'node:assert/strict';
+import {mkdir,mkdtemp,writeFile,readFile,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {existsSync} from 'node:fs';
+import {createApp} from '../server.mjs';
+
+const {server,store}=createApp({dbPath:':memory:'});
+await new Promise(ok=>server.listen(0,'127.0.0.1',ok));
+const base=`http://127.0.0.1:${server.address().port}`;
+const dir=await mkdtemp(join(tmpdir(),'werkheft-e2e-'));
+await mkdir('test-results',{recursive:true});
+const localChrome='/root/.cache/ms-playwright/chromium-1254/chrome-linux64/chrome';
+const executablePath=process.env.CHROMIUM_PATH||(existsSync(localChrome)?localChrome:chromium.executablePath());
+let browser;
+const logs=[],requests=[];
+try {
+ browser=await chromium.launch({executablePath,headless:true,args:['--no-sandbox']});
+ const context=await browser.newContext({viewport:{width:1440,height:1100},locale:'de-DE',reducedMotion:'reduce',acceptDownloads:true});
+ const page=await context.newPage();page.on('pageerror',e=>logs.push(e.message));page.on('console',m=>{if(m.type()==='error')logs.push(m.text());});page.on('request',r=>requests.push(r.url()));page.on('dialog',d=>d.accept());
+ const go=async hash=>{await page.goto(base+'/#'+hash);await page.locator('#main h1').waitFor();};
+ const edit=page.locator('#editor');
+ const fill=async(name,value)=>edit.locator(`[name="${name}"]`).fill(String(value));
+ const save=async()=>{await edit.locator('button[type=submit]').click();await page.waitForFunction(()=>!document.querySelector('#editor').open);};
+ await go('garage');assert.ok(await page.getByText('Hier ist Platz').count());await page.screenshot({path:'test-results/empty-desktop.png',fullPage:true});
+ await page.locator('[data-action=demo]').click();await page.getByRole('heading',{name:'Golf IV 1.9 TDI',exact:true}).waitFor();await page.waitForFunction(()=>!document.querySelector('#toast').classList.contains('show'));
+ const contrast=await page.locator('.task-meta .vehicle-tag').first().evaluate(el=>{const rgb=s=>s.match(/[0-9.]+/g).map(Number),fg=rgb(getComputedStyle(el).color),p=rgb(getComputedStyle(el.closest('.panel')).backgroundColor),b=rgb(getComputedStyle(document.body).backgroundColor),a=p[3]??1,bg=p.slice(0,3).map((c,i)=>c*a+b[i]*(1-a)),lum=c=>c.slice(0,3).map(x=>{x/=255;return x<=.04045?x/12.92:((x+.055)/1.055)**2.4;}).reduce((s,x,i)=>s+x*[.2126,.7152,.0722][i],0);return {ratio:(Math.max(lum(fg),lum(bg))+.05)/(Math.min(lum(fg),lum(bg))+.05),font:parseFloat(getComputedStyle(el).fontSize)};});assert.ok(contrast.ratio>=4.5,'F04: normal-text contrast');assert.ok(contrast.font>=11,'F04: secondary-label size');
+ await page.locator('[data-action=new][data-type=vehicles]').first().click();assert.equal(await edit.locator('[name=km]').inputValue(),'','F03: new vehicle must not copy another mileage');assert.equal(await edit.locator('[name=owner]').inputValue(),'1');await edit.locator('[data-action=close-dialog]').first().click();await page.screenshot({path:'test-results/garage-desktop.png',fullPage:true});await page.screenshot({path:'test-results/garage-overview.png'});
+ for(const hash of ['fahrzeug/'+store.all('vehicles')[0].id,'termine','chronik','tanken','zahlen','regal','games','schrottplatz','wissen','einstellungen']){await go(hash);assert.ok(await page.locator('#main').innerText());}
+ await page.setViewportSize({width:390,height:844});
+ for(const hash of ['garage','fahrzeug/'+store.all('vehicles')[0].id,'tanken','zahlen','regal','games','schrottplatz','wissen','einstellungen']){await go(hash);const width=await page.evaluate(()=>document.documentElement.scrollWidth);assert.ok(width<=391,`Horizontal overflow at ${hash}: ${width}`);}
+ await go('garage');await page.screenshot({path:'test-results/garage-mobile.png',fullPage:true});await page.screenshot({path:'test-results/garage-mobile-overview.png'});
+ await page.setViewportSize({width:320,height:740});for(const hash of ['garage','tanken','regal','einstellungen']){await go(hash);assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth)<=320,'320px layout: '+hash);}
+ store.resetDemo();await page.setViewportSize({width:1440,height:1100});await go('garage');
+ await page.locator('[data-action=new][data-type=vehicles]').first().click();
+ await fill('name','Testauto');await fill('make','Volkswagen');await fill('model','Golf');await fill('km',1000);await fill('owner',1);
+ await edit.locator('[data-action=wizard-next]').click();await fill('vin','WVWZZZ1JZ2W386752');await fill('engine','ALH');await edit.locator('[data-action=wizard-next]').click();await save();
+ await page.getByRole('heading',{name:'Testauto',exact:true}).waitFor();assert.equal(store.all('vehicles').length,1);
+ await go('fahrzeug/'+store.all('vehicles')[0].id+'/staende');await page.locator('[data-action=km]').first().click();await fill('readingDate','2020-01-01');await fill('km',200);await edit.locator('#km-form button:not([type=button])').click();await page.waitForFunction(()=>!document.querySelector('#editor').open);assert.equal(store.all('readings').length,1);assert.equal(store.all('vehicles')[0].km,1000);await go('garage');
+ await page.locator('[data-action=new][data-type=entries]').first().click();await fill('title','Ölwechsel <b>Test</b>');await fill('km',1200);await fill('cost','54.90');await fill('notes','Originalnotiz');await fill('intervalKm',10000);await save();assert.equal(store.all('tasks').length,1);assert.equal(store.all('vehicles')[0].km,1200);
+ await page.locator('[data-action=edit][data-type=entries]').first().click();await fill('notes','Korrigierte Notiz');await save();
+ await page.locator('[data-action=history][data-type=entries]').first().click();await edit.getByText('Originalnotiz',{exact:false}).first().waitFor();assert.ok((await edit.innerText()).includes('Korrigierte Notiz'));await edit.locator('[data-action=close-dialog]').first().click();
+ await go('termine');await page.locator('[data-action=complete]').first().click();await fill('km',11210);await save();assert.equal(store.all('entries').length,2);assert.equal(store.all('tasks').find(t=>!t.done).dueKm,21210);
+ await page.locator('[data-action=new][data-type=tasks]').first().click();await fill('title','Ein Kalendertermin mit ÄÜß '.repeat(4));await fill('dueDate','2027-12-01');await save();
+ const calendarDownload=page.waitForEvent('download');await page.locator('[data-action=calendar]').click();const cal=await calendarDownload;const calPath=join(dir,'termine.ics');await cal.saveAs(calPath);const calendar=await readFile(calPath,'utf8');assert.ok(calendar.includes('BEGIN:VCALENDAR'));assert.ok(calendar.includes('\r\n '));assert.ok(calendar.split('\r\n').every(line=>Buffer.byteLength(line)<=75));
+ await go('tanken');await page.locator('[data-action=new][data-type=fuel]').first().click();await fill('km',11210);await fill('liters',40);await fill('cost',64);await save();
+ await page.locator('[data-action=new][data-type=fuel]').first().click();await fill('km',11810);await fill('liters',36);await fill('cost',57.6);await save();await page.locator('#vehicle-filter').selectOption(store.all('vehicles')[0].id);await page.getByText('6,00',{exact:false}).first().waitFor();
+ await go('regal');await page.locator('[data-action=box-editor]').first().click();await fill('name','Leere Kiste');await edit.locator('[name=color]').selectOption('blue');await save();assert.equal(store.boxes()[0].name,'Leere Kiste');await page.locator('.shelf-box.blue').waitFor();
+ await page.locator('[data-action=new][data-type=shelf]').first().click();await fill('title','Ölfilter');await fill('box','Testkiste');await fill('quantity',0);await edit.locator('[name=needed]').check();await save();assert.equal(store.all('shelf')[0].box,'Testkiste');
+ await page.locator('[data-action=edit][data-type=shelf]').first().click();await fill('box','Andere Kiste');await save();await page.getByRole('heading',{name:'Andere Kiste'}).waitFor();
+ await page.locator('[data-action=duplicate]').first().click();await fill('box','Kopierte Kiste');await save();assert.equal(store.all('shelf').length,2);
+ await page.locator('[data-action=toggle-needed]').first().click();await page.waitForTimeout(100);assert.equal(store.all('shelf')[0].needed,false);
+ // Generate an image locally; no external image or private user file is involved.
+ const data=await page.evaluate(()=>{const c=document.createElement('canvas');c.width=400;c.height=250;const x=c.getContext('2d');x.fillStyle='white';x.fillRect(0,0,400,250);x.fillStyle='black';x.font='20px sans-serif';x.fillText('PRIVATE TEST ADDRESS',20,50);return c.toDataURL('image/png');});
+ const imagePath=join(dir,'test-proof.png');await writeFile(imagePath,Buffer.from(data.split(',')[1],'base64'));
+ await go('nachweise');await page.locator('[data-action=new][data-type=documents]').first().click();await fill('title','Testrechnung');await edit.locator('[name=entryId]').selectOption(store.all('entries')[0].id);await edit.locator('#image-file').setInputFiles(imagePath);
+ await edit.locator('#redaction-tools:not([hidden])').waitFor();const box=await edit.locator('canvas').boundingBox();await page.mouse.move(box.x+box.width*.02,box.y+box.height*.02);await page.mouse.down();await page.mouse.move(box.x+box.width*.8,box.y+box.height*.4);await page.mouse.up();await save();assert.equal(store.all('documents').length,1);
+ const doc=store.all('documents')[0];assert.notEqual(doc.data,data);assert.ok(doc.data.startsWith('data:image/jpeg;base64,'));
+ const pixels=await page.evaluate(async id=>{const i=new Image();await new Promise((ok,no)=>{i.onload=ok;i.onerror=no;i.src='/api/documents/'+id+'/image';});const c=document.createElement('canvas');c.width=i.width;c.height=i.height;const x=c.getContext('2d');x.drawImage(i,0,0);return {covered:[...x.getImageData(30,30,1,1).data],clear:[...x.getImageData(380,230,1,1).data]};},doc.id);assert.ok(pixels.covered[0]<10);assert.ok(pixels.clear[0]>240);
+ await page.locator('[data-action=document]').click();await edit.locator('img').waitFor();await edit.locator('[data-action=close-dialog]').first().click();
+ await go('zahlen');await page.locator('[data-action=new][data-type=expenses]').click();await fill('title','Versicherung');await fill('cost',200);await save();assert.equal(store.all('expenses').length,1);
+ let downloadPromise=page.waitForEvent('download');await page.locator('[data-action=export-costs]').click();let dl=await downloadPromise;assert.ok(dl.suggestedFilename().endsWith('.csv'));
+ await go('einstellungen');downloadPromise=page.waitForEvent('download');await page.locator('[data-action=backup]').click();dl=await downloadPromise;const backupPath=join(dir,'backup.json');await dl.saveAs(backupPath);const backup=JSON.parse(await readFile(backupPath,'utf8'));assert.equal(backup.vehicles.length,1);assert.equal(backup.documents.length,1);
+ await page.locator('[data-action=import]').click();await page.locator('#import-file').setInputFiles(backupPath);await page.getByText('Import abgeschlossen.',{exact:false}).waitFor();assert.equal(store.all('entries').length,2);
+ const id=store.all('vehicles')[0].id;await go('fahrzeug/'+id+'/schein');await page.locator('[data-action=km]').click();await fill('km',11800);await fill('reason','Tippfehler in Test korrigiert');await edit.locator('#km-form button:not([type=button])').click();await page.waitForFunction(()=>!document.querySelector('#editor').open);assert.equal(store.get('vehicles',id).km,11800);
+ downloadPromise=page.waitForEvent('download');await page.locator('[data-action=transfer]').click();dl=await downloadPromise;const transferPath=join(dir,'transfer.json');await dl.saveAs(transferPath);const transfer=JSON.parse(await readFile(transferPath,'utf8'));assert.equal(transfer.fuel,undefined);assert.equal(transfer.entries[0].cost,undefined);
+ await page.locator('[data-action=archive]').click();await page.waitForTimeout(150);assert.equal(store.get('vehicles',id).archived,true);await go('inaktiv');await page.getByRole('heading',{name:'Testauto',exact:true}).waitFor();
+ await go('fahrzeug/'+id);await page.evaluate(()=>{window.print=()=>{window.__printRequested=true;};});await page.locator('[data-action=print]').click();assert.equal(await page.evaluate(()=>window.__printRequested),true);assert.ok((await page.locator('#print-area').innerText()).includes('Testauto'));await page.pdf({path:'test-results/fahrzeugheft.pdf',format:'A4',printBackground:true});
+ await go('schrottplatz');await page.locator('[data-action=new][data-type=board]').click();await fill('title','Nur ein Test-Aushang');await fill('notes','Privat, nicht veröffentlicht.');await save();assert.equal(store.all('board').length,1);
+ await go('games/nachtfahrt');await page.locator('#night-canvas').waitFor();await page.locator('#night-name').fill('Testfahrer');const raceFinished=page.waitForResponse(r=>r.url().endsWith('/api/race/finish'),{timeout:75000});await page.locator('[data-action=game-night-start]').click();await page.locator('#night-name:disabled').waitFor();await page.keyboard.down('ArrowUp');const raceResponse=await raceFinished;await page.keyboard.up('ArrowUp');assert.equal(raceResponse.status(),200);const raceResult=await raceResponse.json();assert.ok(raceResult.score>0);assert.equal(store.getMeta('raceScores')[0].name,'Testfahrer');await page.getByRole('heading',{name:raceResult.score.toLocaleString('de-DE')+' Meter',exact:true}).waitFor();
+ await go('games/quiz');for(const [index,answer] of [1,0,1,2,1].entries()){await page.locator(`[data-action=game-answer][data-index="${answer}"]`).click();await page.locator('[data-action=game-next-quiz]').click();}await page.getByText('5 von 5 richtig.',{exact:true}).waitFor();
+ await go('games/memory');assert.equal(await page.locator('.memory-card').count(),12);await page.locator('.memory-card').first().click();assert.equal(await page.locator('.memory-card.flipped').count(),1);await page.locator('[data-action=game-reset-memory]').click();assert.equal(await page.locator('.memory-card.flipped').count(),0);
+ await go('games/reaktion');await page.locator('[data-action=game-react]').click();await page.locator('.reaction-pad.ready').waitFor({timeout:5000});await page.locator('[data-action=game-react]').click();await page.locator('.reaction-pad.result').waitFor();
+ await go('garage');await page.locator('#search').fill('Testauto');await page.getByText('1 Treffer für',{exact:false}).waitFor();await page.locator('#search').fill('');
+ await page.setViewportSize({width:390,height:844});await go('garage');await page.locator('[data-action=new][data-type=vehicles]').first().click();assert.ok(await edit.locator('[name=name]').isVisible());await page.screenshot({path:'test-results/vehicle-form-mobile.png'});await edit.locator('[data-action=close-dialog]').first().click();
+ const external=requests.filter(u=>!u.startsWith(base)&&!u.startsWith('blob:'+base)&&!u.startsWith('data:'));assert.deepEqual(external,[],'No third-party requests');assert.deepEqual(logs,[],'No browser errors');
+ console.log('E2E: Desktop + Mobile, all pages, vehicle wizard, audit, recurrence, fuel, shelf, redaction, expenses, CSV, backup + import, transfer, archive, board, games, search: PASS');
+ console.log('Screenshots: test-results/garage-desktop.png, test-results/garage-mobile.png');
+}finally{await browser?.close();await new Promise(ok=>server.close(ok));await rm(dir,{recursive:true,force:true});}
