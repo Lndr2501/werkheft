@@ -5,13 +5,16 @@ import {fileURLToPath,pathToFileURL} from 'node:url';
 import {Store} from './lib/store.mjs';
 import {InputError,collections,taskStatus,fuelConsumption,requireObject} from './lib/domain.mjs';
 import {RaceService} from './lib/races.mjs';
+import {handleMcp,mcpAuthorizer} from './lib/mcp.mjs';
 
 const root=dirname(fileURLToPath(import.meta.url));
 const mime={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.otf':'font/otf','.webmanifest':'application/manifest+json'};
 const security={'X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY','Referrer-Policy':'no-referrer','Permissions-Policy':'camera=(), microphone=(), geolocation=()','Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"};
 function privateAddress(address=''){const ip=address.replace(/^::ffff:/,'');if(ip==='::1')return true;const p=ip.split('.').map(Number);return p.length===4&&p.every(n=>Number.isInteger(n)&&n>=0&&n<=255)&&(p[0]===127||p[0]===10||p[0]===192&&p[1]===168||p[0]===172&&p[1]>=16&&p[1]<=31);}
 async function body(req,maxBytes=64*1024*1024){if(!req.headers['content-type']?.startsWith('application/json'))throw new InputError('JSON erwartet.',415);let size=0;const chunks=[];for await(const chunk of req){size+=chunk.length;if(size>maxBytes)throw new InputError('Anfrage ist zu groß.',413);chunks.push(chunk);}let parsed;try{parsed=JSON.parse(Buffer.concat(chunks).toString('utf8'));}catch{throw new InputError('Ungültiges JSON.');}return requireObject(parsed);}
-export function createApp({dbPath=resolve(root,'data/werkheft.sqlite'),allowedHosts=[],privateLAN=false}={}){
+export function createApp({dbPath=resolve(root,'data/werkheft.sqlite'),allowedHosts=[],privateLAN=false,mcpToken,mcpWriteToken}={}){
+ if(mcpWriteToken!==undefined&&(mcpToken===undefined||mcpToken===mcpWriteToken))throw new Error('MCP-Schreibzugriff benötigt ein separates Token zusätzlich zum Lesetoken.');
+ const authorizeMcp=mcpAuthorizer(mcpToken),authorizeMcpWrite=mcpAuthorizer(mcpWriteToken);
  const store=new Store(dbPath),races=new RaceService(store);
  if(store.repairs.documents||store.repairs.corrections)console.log('Werkheft: bestehende Datenbezüge repariert',store.repairs);
  const hosts=new Set(['localhost','127.0.0.1','[::1]',...allowedHosts]);
@@ -23,10 +26,23 @@ export function createApp({dbPath=resolve(root,'data/werkheft.sqlite'),allowedHo
    if(authority.host!==host.toLowerCase()||!hosts.has(authority.hostname))throw new InputError('Dieser Host ist nicht freigegeben.',403);
    const url=new URL(req.url,`http://${host}`),path=url.pathname;
    if(path==='/healthz'&&req.method==='GET')return send(200,{ok:true});
-   if(path.startsWith('/api/')){
+   if(path==='/mcp'||path.startsWith('/api/')){
     if(req.headers['sec-fetch-site']==='cross-site'||req.headers.origin&&![`http://${host}`,`https://${host}`].includes(req.headers.origin))throw new InputError('Fremder Ursprung abgewiesen.',403);
+   }
+   if(path==='/mcp'){
+    if(!authorizeMcp)throw new InputError('KI-Connector ist nicht aktiviert.',404);
+    if(!privateAddress(req.socket.remoteAddress))throw new InputError('Nur Zugriff aus dem privaten Netz erlaubt.',403);
+    const mayWrite=authorizeMcpWrite?.(req.headers.authorization)===true;
+    if(!mayWrite&&!authorizeMcp(req.headers.authorization))return send(401,{error:'Gültiges MCP-Token erforderlich.'},{'WWW-Authenticate':'Bearer realm="Werkheft"'});
+    if(req.method!=='POST')return send(405,{error:'Der zustandslose MCP-Connector unterstützt nur POST.'},{'Allow':'POST'});
+    const payload=await body(req,64*1024);
+    for(const [key,value] of Object.entries(security))res.setHeader(key,value);
+    res.setHeader('Cache-Control','no-store');
+    return await handleMcp(req,res,payload,store,mayWrite);
+   }
+   if(path.startsWith('/api/')){
     if(path==='/api/state'&&req.method==='GET'){
-     const state=store.snapshot();state.tasks=state.tasks.map(t=>({...t,status:taskStatus(t,state.vehicles.find(v=>v.id===t.vehicleId)||{km:0})}));state.huTasks=state.vehicles.filter(v=>v.hu&&!v.archived).map(v=>({id:'hu-'+v.id,kind:'hu',title:'Hauptuntersuchung (HU)',vehicleId:v.id,dueDate:v.hu,dueKm:0,done:false,status:taskStatus({dueDate:v.hu},v)}));state.fuelStats=Object.fromEntries(state.vehicles.map(v=>[v.id,fuelConsumption(state.fuel.filter(f=>f.vehicleId===v.id))]));state.boxes=store.boxes();return send(200,state);
+     const state=store.snapshot();state.tasks=state.tasks.map(t=>({...t,status:taskStatus(t,state.vehicles.find(v=>v.id===t.vehicleId)||{km:0})}));state.huTasks=state.vehicles.filter(v=>v.hu&&!v.archived).map(v=>({id:'hu-'+v.id,kind:'hu',title:'Hauptuntersuchung (HU)',vehicleId:v.id,dueDate:v.hu,dueKm:0,done:false,status:taskStatus({dueDate:v.hu},v)}));state.fuelStats=Object.fromEntries(state.vehicles.map(v=>[v.id,fuelConsumption(state.fuel.filter(f=>f.vehicleId===v.id))]));state.boxes=store.boxes();state.mcpEnabled=Boolean(authorizeMcp);state.mcpWriteEnabled=Boolean(authorizeMcpWrite);return send(200,state);
     }
     if(path==='/api/export'&&req.method==='GET')return send(200,store.export(),{'Content-Disposition':'attachment; filename="werkheft-sicherung.json"'});
     if(path==='/api/import'&&req.method==='POST')return send(200,store.import(await body(req)));
@@ -65,7 +81,9 @@ export function createApp({dbPath=resolve(root,'data/werkheft.sqlite'),allowedHo
 if(process.argv[1]&&import.meta.url===pathToFileURL(resolve(process.argv[1])).href){
  const port=Number(process.env.PORT||4177),bind=process.env.WERKHEFT_BIND||'127.0.0.1',privateLAN=process.env.WERKHEFT_PRIVATE_LAN==='1';
  if(!['127.0.0.1','::1'].includes(bind)&&!privateLAN)throw new Error('Netzwerkbetrieb muss ausdrücklich mit WERKHEFT_PRIVATE_LAN=1 freigegeben werden.');
- const {server}=createApp({dbPath:process.env.WERKHEFT_DB||resolve(root,'data/werkheft.sqlite'),allowedHosts:(process.env.WERKHEFT_ALLOWED_HOSTS||'').split(',').map(s=>s.trim()).filter(Boolean),privateLAN});
+ const readToken=async path=>path?(await readFile(path,'utf8')).trim():undefined;
+ const mcpToken=await readToken(process.env.WERKHEFT_MCP_TOKEN_FILE),mcpWriteToken=await readToken(process.env.WERKHEFT_MCP_WRITE_TOKEN_FILE);
+ const {server}=createApp({dbPath:process.env.WERKHEFT_DB||resolve(root,'data/werkheft.sqlite'),allowedHosts:(process.env.WERKHEFT_ALLOWED_HOSTS||'').split(',').map(s=>s.trim()).filter(Boolean),privateLAN,mcpToken,mcpWriteToken});
  server.listen(port,bind,()=>console.log(`Werkheft läuft auf http://${bind}:${port} · ${privateLAN?'privates Netz, ohne Login':'nur lokal'}`));
  for(const signal of ['SIGINT','SIGTERM'])process.once(signal,()=>server.close(()=>process.exit(0)));
 }
