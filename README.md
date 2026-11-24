@@ -1,6 +1,6 @@
 # Werkheft – private Schraubergarage
 
-Eigenständiger werbefreier Nachbau der Garage-Funktionen, mit dunkler Werkstatt-/Autoradio-Oberfläche. **Auf ausdrücklichen Nutzerwunsch keine Logins, Konten, Passwörter, Bezahlmodelle oder Registrierung.** Alle Geräte im freigegebenen Heimnetz benutzen dasselbe Heft.
+Eigenständiger werbefreier Nachbau der Garage-Funktionen, mit dunkler Werkstatt-/Autoradio-Oberfläche. **Auf ausdrücklichen Nutzerwunsch keine Logins, Konten, Bezahlmodelle oder Registrierung.** Der optionale KI-Connector hat separate Zugriffstoken und ändert den Browserzugang nicht. Alle Geräte im freigegebenen Heimnetz benutzen dasselbe Heft.
 
 ## Laufender Docker-Betrieb
 
@@ -26,13 +26,14 @@ Docker läuft als UID/GID 1000, ohne Linux-Capabilities, mit schreibgeschütztem
 - ICS-Kalenderexport für datierte Aufgaben; korrekte Maskierung und Zeilenfaltung.
 - Tankbuch mit Voll- und Teilfüllungen, Verbrauch aus Volltankintervallen, Preisübersicht, Diagramm und CSV.
 - Buchhaltung aus Tankungen, Arbeiten und weiteren Ausgaben, Fahrzeug-/Zeitraumfilter, Diagramm und CSV.
-- Regal: eigene auch leere Kisten, Umbenennen, Einfärben, Reihenfolge, Drag-and-drop, eigene unveränderte Links, Teile-/Werkzeugbestand, Einkaufsliste, Duplizieren und Verschieben. Tastenschaltflächen als Alternative zum Ziehen.
+- Regal: eigene auch leere Kisten, Umbenennen, Einfärben, Reihenfolge, Drag-and-drop, eigene unveränderte Links, freiwillige Websuche nach der Teilenummer, Teile-/Werkzeugbestand, Einkaufsliste, Duplizieren und Verschieben. Tastenschaltflächen als Alternative zum Ziehen.
 - Nachweise: Bilder an Fahrzeug/Arbeit, lokale Verkleinerung und Neuberechnung vor Upload, manuelle dauerhaft in Pixel eingebrannte Schwärzung. Nur PNG/JPEG/WebP; PDFs vorher lokal als Bild exportieren.
 - Vollbackup/Restore als JSON, mit Vorsicherungsdownload vor Import. Enthält auch Kisten, Ablesungen und Nachtfahrt-Bestenliste.
 - Fahrzeug-Weitergabe als separate datensparsame Datei und Browser-Druck/PDF. Die eigene Kopie bleibt bestehen.
-- Globale Suche, eigene allgemeine Checklisten und privates schwarzes Brett.
+- Globale Suche, werbefreier **Kiosk** mit Einstieg in eigene Checklisten und privates schwarzes Brett.
 - **Nachtfahrt:** vier Fahrspuren, Gas/Bremse, Gegenverkehr, Ölkannen, Kollisionen, Zeitlimit, Touch-/Tastatursteuerung, serverseitige deterministische Nachrechnung und dauerhafte Monats-Bestenliste je frei gewähltem Fahrername. Keine geschützten Spieleridentitäten und kein Anspruch auf fälschungssicheren Wettkampf.
 - Zusätzlich Werkzeug-Memory, Reaktion und Quiz; deren Bestwerte bleiben browserlokal.
+- Optionaler **KI-Connector (MCP)** für das Heimnetz: lesen und mit einem zusätzlichen Schreibtoken Arbeiten erfassen. Standardmäßig deaktiviert.
 - Keine Werbung, Tracker, Affiliate-Umschreibungen, Fremdskripte oder extern geladenen Schriftdateien.
 
 ## Bewusst nicht Teil der privaten Seite
@@ -45,16 +46,38 @@ Die eigenen allgemeinen Checklisten ersetzen keine fahrzeugspezifischen Reparatu
 
 ## Lokal starten
 
-Node.js >=22.13 mit `node:sqlite` genügt; keine Laufzeitpakete:
+Node.js >=22.13 mit `node:sqlite`:
 
 ```sh
 cd /root/Projects/Werkheft
+npm ci
 npm start
 ```
 
 Standard: http://127.0.0.1:4177, nur auf dem lokalen Rechner.
 
 Netzwerkbetrieb wird nur mit `WERKHEFT_PRIVATE_LAN=1` und einer expliziten Host-Allowlist freigegeben. In Docker setzt die Compose-Datei diese Werte. Es gibt absichtlich keine automatische öffentliche Freigabe.
+
+## Optional: KI-Connector (MCP)
+
+Der Connector ist standardmäßig aus. Er bietet lesenden Zugriff auf technische Fahrzeugstammdaten, Serviceeinträge, Kilometerablesungen und offene Termine inklusive HU. Er überträgt keine VIN, Bilder, Notizfelder, Tankungen, Kosten oder archivierten Fahrzeuge. Namen und Titel sind frei eingegeben; schreibe keine vertraulichen Angaben hinein, wenn Du sie per MCP abfragst.
+
+Für einen lokalen Test ein zufälliges Token als Datei außerhalb des Repos erzeugen (einmalig; eine vorhandene Datei wird nicht überschrieben):
+
+```sh
+(umask 077; set -C; openssl rand -hex 32 > "$HOME/.werkheft-mcp-token")
+WERKHEFT_MCP_TOKEN_FILE="$HOME/.werkheft-mcp-token" npm start
+```
+
+Einen MCP-Client mit **Streamable HTTP** und eigenem Authorization-Header in demselben Netz verwenden:
+
+- URL lokal: `http://127.0.0.1:4177/mcp`; im Heimnetz mit TLS: `https://werkheft.drydev.eu/mcp`, sobald dort aktiviert.
+- `Authorization: Bearer <Token>` in der privaten Client-Konfiguration hinterlegen, nie im URL-Parameter.
+- Beispielabfragen: „Welche Wartung ist bei meinem Auto als Nächstes dran?“ oder „Wann war der letzte Ölwechsel?“
+
+Im Docker-Betrieb die Tokendatei separat schreibgeschützt einbinden (lesbar für Container-UID 1000), `WERKHEFT_MCP_TOKEN_FILE` auf den eingebundenen Pfad setzen und beim Zugriff aus dem Heimnetz HTTPS verwenden. Zum Deaktivieren die Einstellung entfernen und Werkheft neu starten; zum Widerrufen das Token ersetzen und neu starten. Das Token gilt für alle aktiven Fahrzeuge. Nicht öffentlich freigeben und keinen Tunnel einrichten. Ein Cloud-Client ohne Zugriff auf Dein Heimnetz kann sich nicht direkt verbinden. Werkheft selbst kontaktiert keinen KI-Anbieter; der gewählte Client kann abgefragte Daten an seinen Anbieter weitergeben.
+
+**Optionaler Schreibzugriff:** Bei Bedarf ein zweites, unterschiedliches Token auf dieselbe Weise in einer separaten Datei erzeugen und deren Pfad über `WERKHEFT_MCP_WRITE_TOKEN_FILE` setzen. Dieses Token kann zusätzlich `add_service_entry` nutzen. Der Client soll Fahrzeug, Titel, Datum und Kilometerstand vor dem Eintragen bestätigen lassen; der Server prüft das Bestätigungsfeld, kann aber nicht feststellen, ob der Client tatsächlich nachgefragt hat. Identische Einträge werden nicht doppelt angelegt. Der Änderungsverlauf markiert die Herkunft. Bestehende Arbeiten lassen sich per MCP weder ändern noch löschen. Ohne Schreibtoken gibt es keinen Schreibzugriff.
 
 ## Aktualisieren und verwalten
 
@@ -93,7 +116,7 @@ Tests laufen mit flüchtigen Datenbanken, nicht gegen Nutzerdaten. Geprüft werd
 ## Dateien
 
 - `server.mjs`: HTTP, private LAN-Freigabe und API.
-- `lib/`: Validierung, SQLite, Audit, Import/Export und Rennwertung.
+- `lib/`: Validierung, SQLite, Audit, Import/Export, Rennwertung und MCP.
 - `public/`: Oberfläche ohne Buildschritt; `race-engine.js` wird vom Browser und Server gemeinsam verwendet.
 - `Dockerfile`, `deploy/compose.yaml`: Betrieb.
 
